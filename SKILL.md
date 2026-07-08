@@ -83,9 +83,12 @@ dbt compile --write-metadata --write-lineage --static-analysis strict
 ```
 
 If `dbt parse` warns that semantic models use **legacy YAML**, they will **not**
-appear in `semantic_manifest.json` under Fusion — migrate them with the
-`building-dbt-semantic-layer` skill first, or the dbt side of the graph will be
-empty.
+appear in `semantic_manifest.json` under Fusion. The builder handles this: it
+automatically falls back to scanning the project's raw `models/**/*.yml` for
+`semantic_models:`/`metrics:` and parses them directly (or pass `--dbt-yaml
+'models/**/*.yml'` explicitly for an un-built project). Migrating with the
+`building-dbt-semantic-layer` skill is still preferred, but the graph no longer goes
+empty in the meantime.
 
 ### Step 2 — Build the graph
 
@@ -111,13 +114,15 @@ and writes the three output files described above.
 
 ### Step 3 — Optional live LSP enrichment
 
-For real-time column-level lineage/diagnostics, start the language server and pass
-its port. Base graph construction does not depend on this — if the server is
-unreachable the build still succeeds with a warning.
+For live diagnostics/hover/navigation, pass a port and the builder will listen on it
+and spawn the server (Fusion's LSP connects *back* to the client — see
+[references/fusion-artifacts.md](references/fusion-artifacts.md)). Base graph
+construction does not depend on this — failures are warnings only. Note: column-level
+lineage is **not** an LSP method; use the `--write-lineage` parquet for CLL.
 
 ```bash
-dbt lsp --socket 8765 --static-analysis strict   # in the project, separate shell
-python3 <SKILL_BASE_DIR>/scripts/build_graph.py --dbt-project . --lsp-socket 8765 --out graph.json
+python3 <SKILL_BASE_DIR>/scripts/build_graph.py --dbt-project . \
+  --lsp-socket 8765 --dbt-executable "$(command -v dbt)" --out graph.json
 ```
 
 ### Step 4 — Review drift and reconcile names

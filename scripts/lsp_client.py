@@ -1,33 +1,37 @@
 """Optional live enrichment from a running dbt Fusion language server.
 
-Start the server in the project first:
-
-    dbt lsp --socket <PORT> --static-analysis strict
-
-This module speaks LSP JSON-RPC over a TCP socket: it performs the
+Fusion's socket transport is **reverse**: `dbt lsp --socket <PORT>` does not
+listen — it *connects out* to an LSP client that is already listening on <PORT>
+(the editor model). So this module listens on the port, (optionally) spawns the
+server pointed at it, accepts the connection, performs the LSP
 `initialize`/`initialized` handshake, records the server's capabilities and any
-published diagnostics into the graph, and attempts a best-effort column-level
-lineage request.
+published diagnostics into the graph, and attempts a best-effort column-lineage
+request.
 
 This path is *optional* — the graph is fully built from static artifacts without
 it. Anything that fails here is recorded as a warning and never aborts the build.
 
-Note: the column-lineage request method (`CLL_METHOD`) is a Fusion server
-extension, not part of base LSP. If your Fusion build names it differently,
-adjust `CLL_METHOD`; the base graph is unaffected either way.
+Note: the column-lineage request method (`CLL_METHODS`) is a Fusion server
+extension, not part of base LSP. We probe a few candidate names; if none are
+supported the base graph is unaffected.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
 import time
 from typing import Any
 
 from graph_model import Graph, COLUMN, DERIVED_FROM
 
-# Extension point: adjust if your Fusion build exposes CLL under another method.
-CLL_METHOD = "dbt/columnLineage"
+# Extension points: candidate method names for column-level lineage.
+CLL_METHODS = (
+    "dbt/columnLineage", "dbt/lineage", "textDocument/columnLineage",
+    "$/dbt/columnLineage",
+)
 
 
 class LspError(Exception):
@@ -35,23 +39,24 @@ class LspError(Exception):
 
 
 class JsonRpcTransport:
-    def __init__(self, host: str, port: int, timeout: float = 10.0) -> None:
-        self.sock = socket.create_connection((host, port), timeout=timeout)
+    """LSP JSON-RPC framing over an already-connected socket."""
+
+    def __init__(self, sock: socket.socket, timeout: float = 20.0) -> None:
+        self.sock = sock
         self.sock.settimeout(timeout)
         self._buf = b""
         self._id = 0
+        self.last_diagnostics: list[dict] = []
 
     def _send(self, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self.sock.sendall(header + body)
+        self.sock.sendall(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
 
     def request(self, method: str, params: dict | None = None) -> Any:
         self._id += 1
         rid = self._id
-        self._send({"jsonrpc": "2.0", "id": rid, "method": method,
-                    "params": params or {}})
-        return self._await_response(rid)
+        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        return self._await(rid)
 
     def notify(self, method: str, params: dict | None = None) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
@@ -76,18 +81,16 @@ class JsonRpcTransport:
             raise LspError("connection closed by server")
         self._buf += chunk
 
-    def _await_response(self, rid: int, deadline: float = 15.0) -> Any:
+    def _await(self, rid: int, deadline: float = 30.0) -> Any:
         end = time.time() + deadline
-        diagnostics: list[dict] = []
         while time.time() < end:
             msg = self._read_message()
             if msg.get("id") == rid:
                 if "error" in msg:
                     raise LspError(str(msg["error"]))
-                self.last_diagnostics = diagnostics
                 return msg.get("result")
             if msg.get("method") == "textDocument/publishDiagnostics":
-                diagnostics.append(msg.get("params", {}))
+                self.last_diagnostics.append(msg.get("params", {}))
         raise LspError(f"timed out awaiting response to request {rid}")
 
     def close(self) -> None:
@@ -98,20 +101,55 @@ class JsonRpcTransport:
 
 
 def enrich_from_lsp(
-    graph: Graph, port: int, project_dir: str, warn: list[str], host: str = "127.0.0.1"
+    graph: Graph,
+    port: int,
+    project_dir: str,
+    warn: list[str],
+    host: str = "127.0.0.1",
+    spawn: bool = True,
+    executable: str = "dbt",
+    profiles_dir: str | None = None,
 ) -> None:
+    """Listen on `port`, (optionally) spawn `dbt lsp --socket port`, and enrich.
+
+    If `spawn` is False, an external `dbt lsp --socket port` is expected to connect.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        rpc = JsonRpcTransport(host, port)
+        listener.bind((host, port))
+        listener.listen(1)
+        listener.settimeout(45.0)
     except OSError as exc:
-        warn.append(f"[lsp] could not connect to {host}:{port}: {exc}")
+        warn.append(f"[lsp] could not listen on {host}:{port}: {exc}")
         return
 
-    rpc.last_diagnostics = []  # type: ignore[attr-defined]
+    proc: subprocess.Popen | None = None
+    if spawn:
+        cmd = [executable, "lsp", "--socket", str(port), "--project-dir", project_dir]
+        if profiles_dir:
+            cmd += ["--profiles-dir", profiles_dir]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+        except OSError as exc:
+            warn.append(f"[lsp] could not spawn `{' '.join(cmd)}`: {exc}")
+            listener.close()
+            return
+
+    rpc: JsonRpcTransport | None = None
     try:
-        root_uri = f"file://{project_dir}"
+        try:
+            conn, _ = listener.accept()
+        except socket.timeout:
+            warn.append("[lsp] timed out waiting for the language server to connect")
+            return
+        rpc = JsonRpcTransport(conn)
+
         caps = rpc.request("initialize", {
-            "processId": None,
-            "rootUri": root_uri,
+            "processId": os.getpid(),
+            "rootUri": f"file://{project_dir}",
             "capabilities": {},
             "clientInfo": {"name": "building-unified-semantic-graph"},
         })
@@ -119,13 +157,13 @@ def enrich_from_lsp(
         graph.metadata["lsp"] = {
             "connected": True,
             "server": (caps or {}).get("serverInfo"),
+            "capabilities": sorted((caps or {}).get("capabilities", {}).keys()),
         }
 
         _try_column_lineage(rpc, graph, warn)
 
-        diagnostics = getattr(rpc, "last_diagnostics", [])
-        if diagnostics:
-            graph.metadata["lsp"]["diagnostics_documents"] = len(diagnostics)
+        if rpc.last_diagnostics:
+            graph.metadata["lsp"]["diagnostics_documents"] = len(rpc.last_diagnostics)
 
         try:
             rpc.request("shutdown")
@@ -134,34 +172,41 @@ def enrich_from_lsp(
             pass
     except LspError as exc:
         warn.append(f"[lsp] enrichment failed: {exc}")
-        graph.metadata.setdefault("lsp", {})["connected"] = True
-        graph.metadata["lsp"]["error"] = str(exc)
+        graph.metadata.setdefault("lsp", {}).update({"connected": True, "error": str(exc)})
     finally:
-        rpc.close()
+        if rpc:
+            rpc.close()
+        listener.close()
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def _try_column_lineage(rpc: JsonRpcTransport, graph: Graph, warn: list[str]) -> None:
-    try:
-        result = rpc.request(CLL_METHOD, {})
-    except LspError as exc:
-        warn.append(
-            f"[lsp] column-lineage request '{CLL_METHOD}' unavailable "
-            f"({exc}); base graph is unaffected"
-        )
+    for method in CLL_METHODS:
+        try:
+            result = rpc.request(method, {})
+        except LspError:
+            continue
+        added = 0
+        for src, tgt in _iter_lineage_edges(result):
+            s = graph.node(COLUMN, "dbt", str(src).lower(), str(src))
+            t = graph.node(COLUMN, "dbt", str(tgt).lower(), str(tgt))
+            graph.add_edge(DERIVED_FROM, t.id, s.id, source="lsp")
+            added += 1
+        graph.metadata.setdefault("lsp", {})["cll_method"] = method
+        graph.metadata["lsp"]["cll_edges"] = added
         return
-    added = 0
-    for edge in _iter_lineage_edges(result):
-        src, tgt = edge
-        s = graph.node(COLUMN, "dbt", str(src).lower(), str(src))
-        t = graph.node(COLUMN, "dbt", str(tgt).lower(), str(tgt))
-        graph.add_edge(DERIVED_FROM, t.id, s.id, source="lsp")
-        added += 1
-    if added:
-        graph.metadata.setdefault("lsp", {})["cll_edges"] = added
+    warn.append(
+        f"[lsp] no column-lineage method among {CLL_METHODS} was supported; "
+        "base graph is unaffected"
+    )
 
 
 def _iter_lineage_edges(result: Any):
-    """Yield (source, target) pairs from a lineage payload, defensively."""
     if not result:
         return
     rows = result if isinstance(result, list) else result.get("edges", [])

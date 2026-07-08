@@ -42,18 +42,44 @@ required for the metric/drift analysis.
 - A dbt **Mesh** is handled by passing `--dbt-project` once per project; their nodes
   merge into one graph by physical `relation_name`.
 
-## Live LSP enrichment (optional)
+## Raw semantic YAML (fallback / legacy spec)
 
-Start the server in the project, then point the builder at its port:
+The dbt side is normally read from `semantic_manifest.json`. But **legacy-spec
+semantic models are not compiled into that file** by Fusion. So `parse_dbt.py`
+automatically falls back to scanning `models/**/*.yml|*.yaml` for raw
+`semantic_models:` / `metrics:` blocks whenever the manifest yields no metrics, and
+parses them directly (resolving `model: ref('x')` to the physical table when the
+manifest is present). You can also point at raw YAML explicitly for an un-built
+project:
 
 ```bash
-dbt lsp --socket 8765 --static-analysis strict
-python3 scripts/build_graph.py --dbt-project . --lsp-socket 8765 --out graph.json
+python3 scripts/build_graph.py --dbt-yaml 'models/**/*.yml' --out graph.json
 ```
 
-`lsp_client.py` performs the LSP `initialize`/`initialized` handshake, records the
-server's capabilities and any published diagnostics into `graph.metadata`, and
-attempts a best-effort column-lineage request. The column-lineage method
-(`CLL_METHOD` in `lsp_client.py`, default `dbt/columnLineage`) is a Fusion server
-extension — if your build names it differently, adjust that constant. Connection
-failures are recorded as warnings and never abort the build.
+Raw-YAML nodes use the same id scheme as manifest nodes, so if both are present they
+merge. This is what lets the graph capture (and drift-check) a project's governed
+`filter:`-based metrics even before migration.
+
+## Live LSP enrichment (optional)
+
+Fusion's socket transport is **reversed**: `dbt lsp --socket <PORT>` does not listen
+— it connects *out* to a client already listening on `<PORT>`. So `lsp_client.py`
+listens on the port and spawns the server pointed back at it:
+
+```bash
+python3 scripts/build_graph.py --dbt-project . --lsp-socket 8765 \
+  --dbt-executable "$(command -v dbt)" --out graph.json
+```
+
+It performs the LSP `initialize`/`initialized` handshake (verified against
+`dbt-lsp 2.0.0-preview.189`) and records the server's `serverInfo` + capabilities
+into `graph.metadata.lsp`. Connection/timeout failures are warnings, never fatal.
+
+**Column-level lineage is *not* an LSP method.** The Fusion LSP advertises standard
+providers (`hover`, `definition`, `references`, `semanticTokens`, `codeLens`) plus
+`executeCommand` with: `dbt.listNodes`, `dbt.getCurrentNode`, `dbt.compileFile`,
+`dbt.compileLsp`, `dbt.clearTarget`, `dbt.getProjectInfo`, `dbt.show` — none return
+column lineage. So for CLL use the parquet path (`dbt compile --write-lineage`)
+above; the LSP is for interactive/positional queries (hover types, go-to-definition,
+find-references, live compile/diagnostics). `lsp_client.CLL_METHODS` probes a few
+candidate names and safely reports "unsupported" if the extension isn't present.

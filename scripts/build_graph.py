@@ -55,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build unified semantic knowledge graph")
     ap.add_argument("--dbt-project", action="append", default=[],
                     help="dbt project dir (uses its target/) or a target/ dir")
+    ap.add_argument("--dbt-yaml", action="append", default=[],
+                    help="glob of raw dbt semantic YAML files (semantic_models/metrics), "
+                         "for projects with no compiled artifacts")
     ap.add_argument("--snowflake-sql", action="append", default=[],
                     help="glob of CREATE SEMANTIC VIEW .sql files")
     ap.add_argument("--databricks-yaml", action="append", default=[],
@@ -64,7 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lookml", action="append", default=[],
                     help="glob of LookML .lkml files (views + explores)")
     ap.add_argument("--lsp-socket", type=int, default=None,
-                    help="port of a running `dbt lsp --socket PORT` (optional)")
+                    help="listen on this port and spawn `dbt lsp --socket PORT` to "
+                         "connect back for live column-lineage/diagnostics (optional)")
+    ap.add_argument("--dbt-executable", default="dbt",
+                    help="dbt Fusion executable used to spawn the language server")
     ap.add_argument("--crosswalk", default=None,
                     help="optional JSON crosswalk for renamed concepts")
     ap.add_argument("--out", default="semantic_graph.json")
@@ -79,6 +85,14 @@ def main(argv: list[str] | None = None) -> int:
         target = _target_dir(project)
         parse_dbt.parse_dbt_project(target, graph, warn)
         sources_used.append(f"dbt:{target}")
+
+    # 1b. Raw dbt semantic YAML (explicit; for un-built projects)
+    for path in _expand(args.dbt_yaml):
+        with open(path) as f:
+            doc = __import__("yaml").safe_load(f)
+        if isinstance(doc, dict):
+            parse_dbt._parse_semantic_yaml_doc(doc, graph)
+        sources_used.append(f"dbt-yaml:{path}")
 
     # 2. Snowflake Semantic Views
     for path in _expand(args.snowflake_sql):
@@ -109,7 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         project_dir = os.path.expanduser(args.dbt_project[0]) if args.dbt_project else os.getcwd()
         if os.path.basename(os.path.normpath(project_dir)) == "target":
             project_dir = os.path.dirname(os.path.normpath(project_dir))
-        lsp_client.enrich_from_lsp(graph, args.lsp_socket, project_dir, warn)
+        lsp_client.enrich_from_lsp(
+            graph, args.lsp_socket, project_dir, warn,
+            executable=args.dbt_executable,
+        )
 
     if not graph.nodes:
         print("ERROR: no inputs produced any nodes. Check paths/globs.", file=sys.stderr)
