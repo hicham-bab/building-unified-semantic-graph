@@ -87,12 +87,14 @@ composition graph and saved queries, and its resolved artifacts carry physical
 back-links the others attach to. Concepts are matched by normalized name, with an
 optional crosswalk file for deliberate renames.
 
-See [`references/`](references/) for the full schema, spec crosswalk, artifact
-generation, and drift rules.
+**Start with [`ARCHITECTURE.md`](ARCHITECTURE.md)** for the full data flow, module
+map, and design rationale. Then [`references/`](references/) has the field-level
+detail: the graph schema, spec crosswalk, artifact generation, and drift rules.
 
 ## Layout
 
 ```
+ARCHITECTURE.md               # full design: data flow, module map, rationale
 SKILL.md                      # the Wizard skill definition
 scripts/                      # parsers + graph model + CLI (dependency-light Python)
 references/                   # schema, crosswalk, artifacts, drift docs (loaded on demand)
