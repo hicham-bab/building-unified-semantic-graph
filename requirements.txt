@@ -1,0 +1,3 @@
+pyyaml>=6.0
+# Optional: only needed to read Fusion column-level-lineage parquet.
+pyarrow>=14.0

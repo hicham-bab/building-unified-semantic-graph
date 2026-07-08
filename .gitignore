@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+# generated graph outputs
+*_graph.json
+*_drift_report.md
+*_concepts.json
+semantic_graph*.json
+.DS_Store

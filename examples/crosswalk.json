@@ -1,0 +1,11 @@
+{
+  "concepts": [
+    { "canonical": "recognised_revenue",
+      "dbt": "total_recognised_revenue",
+      "snowflake": "total_net_revenue",
+      "databricks": "total_revenue" },
+    { "canonical": "average_order_value",
+      "dbt": "average_order_value",
+      "databricks": "avg_order_value" }
+  ]
+}

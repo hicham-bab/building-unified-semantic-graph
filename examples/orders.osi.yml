@@ -1,0 +1,40 @@
+semantic_model:
+  - name: commerce
+    description: OSI export of the orders semantic model
+    datasets:
+      - name: orders
+        source: ATLAS_PLATFORM.MARTS_CORE.FCT_ORDERS
+        primary_key: [order_id]
+        fields:
+          - name: order_date
+            dimension: {is_time: true}
+            expression:
+              dialects:
+                - {dialect: ANSI_SQL, expression: order_date}
+          - name: store_channel
+            dimension: {is_time: false}
+            expression:
+              dialects:
+                - {dialect: ANSI_SQL, expression: store_channel}
+      - name: stores
+        source: ATLAS_PLATFORM.MARTS_CORE.DIM_STORES
+        primary_key: [store_id]
+        fields:
+          - name: region
+            expression: {dialects: [{dialect: ANSI_SQL, expression: region}]}
+    relationships:
+      - name: orders_to_stores
+        from: orders
+        to: stores
+        from_columns: [store_id]
+        to_columns: [store_id]
+    metrics:
+      - name: total_gross_revenue
+        description: Total gross revenue
+        expression:
+          dialects:
+            - {dialect: ANSI_SQL, expression: "SUM(gross_revenue)"}
+      - name: return_rate
+        expression:
+          dialects:
+            - {dialect: ANSI_SQL, expression: "COUNT_IF(is_returned) / COUNT(order_id) * 100"}
