@@ -18,7 +18,10 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 from typing import Any
+
+import yaml
 
 from graph_model import (
     Graph, PHYSICAL_TABLE, COLUMN, SEMANTIC_MODEL, ENTITY, DIMENSION, MEASURE,
@@ -41,20 +44,46 @@ def _rel(relation_name: str | None) -> str:
     return (relation_name or "").lower()
 
 
+def _count_dbt_metrics(graph: Graph) -> int:
+    return sum(1 for n in graph.nodes.values()
+               if n.platform == PLATFORM and n.type == METRIC)
+
+
 def parse_dbt_project(target_dir: str, graph: Graph, warn: list[str]) -> None:
-    """Parse one project's target/ dir into `graph`. Missing files are tolerated."""
+    """Parse one project's target/ dir into `graph`. Missing files are tolerated.
+
+    If `semantic_manifest.json` yields no metrics (e.g. the project uses the legacy
+    semantic YAML that Fusion doesn't compile into artifacts), fall back to scanning
+    the project's raw semantic YAML so the dbt side is still captured.
+    """
     manifest = _load(os.path.join(target_dir, "manifest.json"))
     sem = _load(os.path.join(target_dir, "semantic_manifest.json"))
     catalog = _load(os.path.join(target_dir, "catalog.json"))
 
+    project_dir = os.path.dirname(os.path.normpath(target_dir))
+
     if manifest is None and sem is None:
-        warn.append(f"[dbt] no manifest.json or semantic_manifest.json in {target_dir}")
+        warn.append(
+            f"[dbt] no manifest.json or semantic_manifest.json in {target_dir}; "
+            "scanning raw semantic YAML instead"
+        )
+        scan_project_semantic_yaml(project_dir, graph, warn)
         return
 
     if manifest:
         _parse_manifest(manifest, catalog, graph)
+
+    before = _count_dbt_metrics(graph)
     if sem:
         _parse_semantic_manifest(sem, graph, warn)
+    if _count_dbt_metrics(graph) == before:
+        # semantic_manifest had no metrics for this project — use raw YAML
+        n = scan_project_semantic_yaml(project_dir, graph, warn)
+        if n:
+            warn.append(
+                f"[dbt] semantic_manifest.json had no metrics; recovered {n} from raw "
+                f"YAML in {project_dir} (legacy spec — consider migrating to current spec)"
+            )
 
     _load_cll(target_dir, graph, warn)
 
@@ -311,3 +340,157 @@ def _first(row: dict, keys: tuple[str, ...]) -> Any:
         if k in row and row[k]:
             return row[k]
     return None
+
+
+# ---- raw semantic YAML (fallback / legacy spec) -----------------------------
+
+_REF_RE = re.compile(r"ref\(\s*['\"]([^'\"]+)['\"]")
+
+
+def scan_project_semantic_yaml(project_dir: str, graph: Graph, warn: list[str]) -> int:
+    """Scan a dbt project's YAML for raw `semantic_models:`/`metrics:` and parse them.
+
+    Used when compiled artifacts don't carry the semantic layer. Returns the number
+    of metrics recovered. Node ids match the manifest scheme, so if both are present
+    they merge cleanly.
+    """
+    recovered = 0
+    for pattern in ("models/**/*.yml", "models/**/*.yaml"):
+        for path in sorted(glob.glob(os.path.join(project_dir, pattern), recursive=True)):
+            try:
+                with open(path) as f:
+                    doc = yaml.safe_load(f)
+            except (yaml.YAMLError, OSError) as exc:
+                warn.append(f"[dbt] could not read semantic YAML {path}: {exc}")
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if "semantic_models" not in doc and "metrics" not in doc:
+                continue
+            recovered += _parse_semantic_yaml_doc(doc, graph)
+    return recovered
+
+
+def _resolve_ref_table(model_expr: str | None, graph: Graph) -> str | None:
+    """Map a `ref('name')` to an existing dbt PhysicalTable node id, or make one."""
+    if not model_expr:
+        return None
+    m = _REF_RE.search(model_expr)
+    name = m.group(1) if m else model_expr
+    for node in graph.nodes.values():
+        if node.platform != PLATFORM or node.type != PHYSICAL_TABLE:
+            continue
+        uid = node.props.get("dbt_unique_id", "")
+        if uid.startswith("model.") and uid.rsplit(".", 1)[-1] == name:
+            return node.id
+        if node.name == name:
+            return node.id
+    return graph.node(
+        PHYSICAL_TABLE, PLATFORM, f"ref:{name}", name, ref=name, resolved=False
+    ).id
+
+
+def _parse_semantic_yaml_doc(doc: dict, graph: Graph) -> int:
+    measure_index: dict[str, str] = {}
+    entity_occurrences: dict[str, list[tuple[str, str]]] = {}
+
+    for sm in doc.get("semantic_models", []) or []:
+        sm_name = sm.get("name")
+        sm_node = graph.node(
+            SEMANTIC_MODEL, PLATFORM, sm_name, sm_name,
+            description=sm.get("description"), label=sm.get("label"),
+            spec="raw_yaml",
+        )
+        table_id = _resolve_ref_table(sm.get("model"), graph)
+        if table_id:
+            graph.add_edge(BOUND_TO, sm_node.id, table_id)
+
+        for ent in sm.get("entities", []) or []:
+            e = graph.node(
+                ENTITY, PLATFORM, f"{sm_name}.{ent['name']}", ent["name"],
+                entity_type=ent.get("type"), expr=ent.get("expr"),
+            )
+            graph.add_edge(HAS_ENTITY, sm_node.id, e.id)
+            entity_occurrences.setdefault(ent["name"], []).append(
+                (sm_node.id, ent.get("type"))
+            )
+
+        for dim in sm.get("dimensions", []) or []:
+            tp = dim.get("type_params") or {}
+            node = graph.node(
+                DIMENSION, PLATFORM, f"{sm_name}.{dim['name']}", dim["name"],
+                dimension_type=dim.get("type"),
+                time_granularity=tp.get("time_granularity"),
+                expr=dim.get("expr"), display_name=dim.get("label"),
+                description=dim.get("description"),
+            )
+            graph.add_edge(HAS_DIMENSION, sm_node.id, node.id)
+
+        for mea in sm.get("measures", []) or []:
+            m = graph.node(
+                MEASURE, PLATFORM, f"{sm_name}.{mea['name']}", mea["name"],
+                agg=mea.get("agg"), expr=mea.get("expr"),
+                canonical_expr=f"{mea.get('agg')}({mea.get('expr')})",
+                display_name=mea.get("label"), description=mea.get("description"),
+                has_filter=False,
+            )
+            graph.add_edge(HAS_MEASURE, sm_node.id, m.id)
+            measure_index[mea["name"]] = m.id
+
+    for ent_name, occ in entity_occurrences.items():
+        primaries = [nid for nid, t in occ if t == "primary"]
+        foreigns = [nid for nid, t in occ if t == "foreign"]
+        for f_id in foreigns:
+            for p_id in primaries:
+                if f_id != p_id:
+                    graph.add_edge(JOINS, f_id, p_id, cardinality="many_to_one",
+                                   on_entity=ent_name, inferred=True)
+
+    count = 0
+    for mt in doc.get("metrics", []) or []:
+        _parse_yaml_metric(mt, graph, measure_index)
+        count += 1
+    return count
+
+
+def _parse_yaml_metric(mt: dict, graph: Graph, measure_index: dict[str, str]) -> None:
+    name = mt.get("name")
+    mtype = mt.get("type")
+    tp = mt.get("type_params") or {}
+    canonical = None
+    has_filter = bool(mt.get("filter"))
+
+    node = graph.node(
+        METRIC, PLATFORM, name, name,
+        metric_type=mtype, description=mt.get("description"),
+        display_name=mt.get("label"),
+    )
+
+    if mtype == "simple":
+        measure = tp.get("measure")
+        mref = measure.get("name") if isinstance(measure, dict) else measure
+        if isinstance(measure, dict) and measure.get("filter"):
+            has_filter = True
+        if mref and mref in measure_index:
+            graph.add_edge(MEASURE_OF, node.id, measure_index[mref])
+            canonical = graph.nodes[measure_index[mref]].props.get("canonical_expr")
+    elif mtype == "ratio":
+        num = tp.get("numerator")
+        den = tp.get("denominator")
+        num_name = num.get("name") if isinstance(num, dict) else num
+        den_name = den.get("name") if isinstance(den, dict) else den
+        if (isinstance(num, dict) and num.get("filter")) or \
+           (isinstance(den, dict) and den.get("filter")):
+            has_filter = True
+        canonical = f"{num_name} / {den_name}"
+        for ref in (num_name, den_name):
+            if ref:
+                graph.add_edge(COMPOSED_OF, node.id, f"{PLATFORM}:{METRIC}:{ref}")
+    elif mtype in ("derived", "cumulative", "conversion"):
+        canonical = tp.get("expr")
+        for ref in tp.get("metrics", []) or []:
+            ref_name = ref.get("name") if isinstance(ref, dict) else ref
+            graph.add_edge(COMPOSED_OF, node.id, f"{PLATFORM}:{METRIC}:{ref_name}")
+
+    node.props["canonical_expr"] = canonical
+    node.props["has_filter"] = has_filter
