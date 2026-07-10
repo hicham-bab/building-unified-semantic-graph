@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Build a unified semantic knowledge graph across dbt, Snowflake, and Databricks.
+"""Build a unified semantic knowledge graph across dbt, Snowflake, Databricks,
+OSI, LookML, and Power BI.
 
 Ingests Fusion static artifacts (the "LSP infos" — manifest.json,
 semantic_manifest.json, catalog.json, column-level lineage) plus every
 semantic-layer spec in play (dbt MetricFlow, Snowflake Semantic Views, Databricks
-Metric Views), merges them into one JSON property graph, and flags
-cross-platform drift.
+Metric Views, OSI, LookML) and a Power BI metadata dump, merges them into one
+JSON property graph, and flags cross-platform drift.
 
 Usage:
   python3 build_graph.py \
     --dbt-project PATH [--dbt-project PATH ...] \
     --snowflake-sql 'GLOB' [--snowflake-sql 'GLOB' ...] \
     --databricks-yaml 'GLOB' [--databricks-yaml 'GLOB' ...] \
+    --powerbi DIR [--powerbi DIR ...] \
     [--lsp-socket PORT] \
     [--crosswalk crosswalk.json] \
     [--out semantic_graph.json]
 
 `--dbt-project` accepts a project dir (its `target/` is used) or a `target/` dir
-directly. Outputs `<out>` and a sibling `<out stem>_drift_report.md`.
+directly. `--powerbi` takes a Power BI metadata dump directory (the output of
+`powerbi/pull_powerbi_metadata.py`). Outputs `<out>` and a sibling
+`<out stem>_drift_report.md`.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import parse_snowflake_semantic_view as sf
 import parse_databricks_metric_view as dbx
 import parse_osi
 import parse_lookml
+import parse_powerbi
 import detect_drift
 import lsp_client
 
@@ -66,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="glob of OSI core-spec .yml/.yaml/.json files")
     ap.add_argument("--lookml", action="append", default=[],
                     help="glob of LookML .lkml files (views + explores)")
+    ap.add_argument("--powerbi", action="append", default=[],
+                    help="Power BI metadata dump dir (output of "
+                         "powerbi/pull_powerbi_metadata.py)")
     ap.add_argument("--lsp-socket", type=int, default=None,
                     help="listen on this port and spawn `dbt lsp --socket PORT` to "
                          "connect back for live column-lineage/diagnostics (optional)")
@@ -118,6 +126,14 @@ def main(argv: list[str] | None = None) -> int:
             parse_lookml.parse_lookml(f.read(), graph, warn, origin=path)
         sources_used.append(f"lookml:{path}")
 
+    # 3d. Power BI metadata dumps
+    for metadata_dir in args.powerbi:
+        parse_powerbi.parse_powerbi_dir(metadata_dir, graph, warn)
+        sources_used.append(f"powerbi:{os.path.expanduser(metadata_dir)}")
+
+    # 3e. Bridge Power BI tables to dbt-built relations (dbt is the spine)
+    pbi_dbt_links = parse_powerbi.link_to_dbt(graph, warn)
+
     # 4. Optional live LSP enrichment
     if args.lsp_socket:
         project_dir = os.path.expanduser(args.dbt_project[0]) if args.dbt_project else os.getcwd()
@@ -142,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     graph.metadata.update({
         "sources": sources_used,
         "warnings": warn,
+        "powerbi_dbt_links": pbi_dbt_links,
         "drift_summary": {
             "concepts_compared": summary["concepts_compared"],
             "equivalences": summary["equivalences"],
@@ -170,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
           f"platforms: {', '.join(graph.platforms_present()) or 'none'}")
     print(f"  concepts compared: {summary['concepts_compared']}  "
           f"equivalences: {summary['equivalences']}")
+    if args.powerbi:
+        print(f"  Power BI -> dbt table links: {pbi_dbt_links}")
     findings = summary["findings"]
     total = sum(len(v) for v in findings.values())
     print(f"  drift findings: {total} "

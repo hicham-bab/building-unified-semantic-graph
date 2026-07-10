@@ -51,7 +51,7 @@ collapse into one concept. JSON, passed via `--crosswalk`:
 ```
 
 Each per-platform value may be a string or a list. Any platform key from the
-supported set (`dbt`, `snowflake`, `databricks`, `osi`, `lookml`) is honored.
+supported set (`dbt`, `snowflake`, `databricks`, `osi`, `lookml`, `powerbi`) is honored.
 Without a crosswalk, only concepts whose names already agree will match.
 
 ## Outputs

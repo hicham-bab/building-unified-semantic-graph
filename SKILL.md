@@ -1,6 +1,6 @@
 ---
 name: building-unified-semantic-graph
-description: Use when you need to unify semantic-layer definitions across platforms into one knowledge graph and check them for consistency. Ingests dbt Fusion artifacts (manifest, semantic_manifest, catalog, column-level lineage — the LSP's static analysis) plus every semantic spec in play — dbt Semantic Layer / MetricFlow, Snowflake Semantic Views, Databricks Metric Views, Open Semantic Interchange (OSI) core-spec, and LookML — merges them into a single JSON property graph (plus an easy-to-consume concept catalog), and flags cross-platform drift (missing metrics, expression mismatches, grain mismatches, inlined filters). Triggers on "unify semantic layers", "semantic knowledge graph", "compare metrics across dbt/Snowflake/Databricks/OSI/LookML", "semantic drift".
+description: Use when you need to unify semantic-layer definitions across platforms into one knowledge graph and check them for consistency. Ingests dbt Fusion artifacts (manifest, semantic_manifest, catalog, column-level lineage — the LSP's static analysis) plus every semantic spec in play — dbt Semantic Layer / MetricFlow, Snowflake Semantic Views, Databricks Metric Views, Open Semantic Interchange (OSI) core-spec, LookML, and a Power BI metadata dump — merges them into a single JSON property graph (plus an easy-to-consume concept catalog), flags cross-platform drift (missing metrics, expression mismatches, grain mismatches, inlined filters), and traces Power BI reports back to the dbt models that build them. Triggers on "unify semantic layers", "semantic knowledge graph", "compare metrics across dbt/Snowflake/Databricks/OSI/LookML/Power BI", "Power BI to dbt lineage", "semantic drift".
 allowed-tools: "Bash(dbt:*), Bash(python3:*), Read, Write, Edit, Glob, Grep"
 metadata:
   author: hicham-babahmed
@@ -41,6 +41,7 @@ back-links (`node_relation`), so we build it first and overlay the others.
 - [references/spec-crosswalk.md](references/spec-crosswalk.md) — how each platform's fields map to the shared concepts
 - [references/fusion-artifacts.md](references/fusion-artifacts.md) — locating/generating the dbt "LSP infos" (artifacts + live LSP)
 - [references/drift-detection.md](references/drift-detection.md) — matching rules, drift subtypes, and the crosswalk file format
+- [references/powerbi.md](references/powerbi.md) — the Power BI metadata dump → graph mapping and the dbt bridge
 
 ## Workflow
 
@@ -66,6 +67,8 @@ Find which of the three spec types the project has. Typical locations:
 - **OSI core-spec**: `.yml`/`.yaml`/`.json` with a `semantic_model:` containing
   `datasets:` / `metrics:` / `relationships:`.
 - **LookML**: `.lkml` files with `view:` / `explore:` blocks.
+- **Power BI**: a metadata dump directory (default `metadata_output/`, containing
+  `datasets/*.json` + `reports.json`) produced by `powerbi/pull_powerbi_metadata.py`.
 
 Use Glob/Grep to locate them. Record the paths — they become the CLI inputs.
 
@@ -102,15 +105,19 @@ python3 <SKILL_BASE_DIR>/scripts/build_graph.py \
   --databricks-yaml '/path/to/metric_views/*.yml' \
   --osi '/path/to/*.osi.yml' \
   --lookml '/path/to/*.lkml' \
+  --powerbi metadata_output \
   --crosswalk crosswalk.json \
   --out semantic_graph.json
 ```
 
 `--dbt-project` takes a project dir (its `target/` is used) or a `target/` dir
-directly, and may be repeated for a dbt Mesh. Every flag is optional and repeatable;
-provide only the specs you have. Globs must be quoted so the script expands them.
-The command prints node/edge counts, platforms, equivalences, and a drift breakdown,
-and writes the three output files described above.
+directly, and may be repeated for a dbt Mesh. `--powerbi` takes a Power BI metadata
+dump directory (see [references/powerbi.md](references/powerbi.md)); when both dbt and
+Power BI are present the builder automatically bridges Power BI tables to dbt-built
+relations. Every flag is optional and repeatable; provide only the specs you have.
+Globs must be quoted so the script expands them. The command prints node/edge counts,
+platforms, equivalences, a drift breakdown, and the Power BI→dbt link count, and
+writes the three output files described above.
 
 ### Step 3 — Optional live LSP enrichment
 
