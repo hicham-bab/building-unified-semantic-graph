@@ -1,3 +1,10 @@
+# --- Unified semantic graph (scripts/) ---
 pyyaml>=6.0
 # Optional: only needed to read Fusion column-level-lineage parquet.
 pyarrow>=14.0
+
+# --- Power BI tooling (powerbi/) ---
+# The Power BI metadata puller uses the stdlib only (auth via the `az` CLI).
+# These are only needed for the optional Snowflake connectivity test.
+snowflake-connector-python>=3.0
+cryptography>=41.0

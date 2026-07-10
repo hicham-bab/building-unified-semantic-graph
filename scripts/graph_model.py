@@ -31,6 +31,7 @@ SAVED_QUERY = "SavedQuery"
 DEPENDS_ON = "DEPENDS_ON"        # model -> upstream model / source
 DERIVED_FROM = "DERIVED_FROM"    # column -> upstream column (column-level lineage)
 JOINS = "JOINS"                  # semantic model -> semantic model (with cardinality)
+HAS_COLUMN = "HAS_COLUMN"        # physical table -> column
 HAS_DIMENSION = "HAS_DIMENSION"  # semantic model -> dimension
 HAS_MEASURE = "HAS_MEASURE"      # semantic model -> measure
 HAS_ENTITY = "HAS_ENTITY"        # semantic model -> entity
@@ -41,7 +42,7 @@ GROUPED_BY = "GROUPED_BY"        # saved query -> metric / dimension
 EQUIVALENT_TO = "EQUIVALENT_TO"  # cross-platform concept match
 DRIFT = "DRIFT"                  # cross-platform inconsistency (props.subtype)
 
-PLATFORMS = ("dbt", "snowflake", "databricks", "osi", "lookml")
+PLATFORMS = ("dbt", "snowflake", "databricks", "osi", "lookml", "powerbi")
 
 
 # ---- Normalization ----------------------------------------------------------

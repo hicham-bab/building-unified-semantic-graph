@@ -1,20 +1,20 @@
 # Spec crosswalk — how each platform maps to the shared concepts
 
-Five spec formats feed the graph. They share a core (physical table, dimension,
+Six spec formats feed the graph. They share a core (physical table, dimension,
 measure/metric) and diverge on the extras. This table drives the parsers.
 
-| Concept | dbt MetricFlow | Snowflake Semantic View | Databricks Metric View | OSI core-spec | LookML |
-|---|---|---|---|---|---|
-| **Physical table** | `model: ref()` + resolved `node_relation` | `TABLES(...)` FQ names | `source:` FQ UC table | `dataset.source` | `sql_table_name` |
-| **Semantic container** | semantic_model | semantic view (multi-table) | metric view (1 table) | semantic_model → datasets | view |
-| **Dimension** | `dimensions` (time/categorical) | `DIMENSIONS(...)` | `dimensions` (+`format`,`synonyms`) | `dataset.fields` (+`dimension.is_time`) | `dimension` / `dimension_group` |
-| **Measure / metric** | `measures` + first-class `metrics` | `MEASURES ... AS <sql>` | `measures` (`expr`) | `metrics` (`expression.dialects`) | `measure` (`type`+`sql`) |
-| **Raw fact column** | — (measure `expr`) | `FACTS(...)` split | — | field expression | dimension `sql` |
-| **Join / entity** | `entities` primary/foreign (inferred) | `RELATIONSHIPS ... MANY TO ONE` | none (single-source) | `relationships` (`from`→many, `to`→one) | `explore` `join` + `relationship` |
-| **Metric composition** | ratio/derived, offset, filter | inlined into `expr` | inlined into `expr` | inlined into expression | inlined into `sql` (or `type`) |
-| **Saved query** | `saved_queries` | — | — | — | — (Looks / dashboards, not parsed) |
-| **NL / presentation** | `label`, `description` | `LABEL`, `COMMENT` | `display_name`, `format`, `synonyms` | `description`, `ai_context` | `label`, `group_label` |
-| **Format** | YAML (→ artifacts) | SQL DDL | YAML | YAML **or** JSON | LookML DSL |
+| Concept | dbt MetricFlow | Snowflake Semantic View | Databricks Metric View | OSI core-spec | LookML | Power BI |
+|---|---|---|---|---|---|---|
+| **Physical table** | `model: ref()` + resolved `node_relation` | `TABLES(...)` FQ names | `source:` FQ UC table | `dataset.source` | `sql_table_name` | dataset table → `<database>.<table>` (no schema) |
+| **Semantic container** | semantic_model | semantic view (multi-table) | metric view (1 table) | semantic_model → datasets | view | dataset |
+| **Dimension** | `dimensions` (time/categorical) | `DIMENSIONS(...)` | `dimensions` (+`format`,`synonyms`) | `dataset.fields` (+`dimension.is_time`) | `dimension` / `dimension_group` | table `Column` (no semantic dim layer) |
+| **Measure / metric** | `measures` + first-class `metrics` | `MEASURES ... AS <sql>` | `measures` (`expr`) | `metrics` (`expression.dialects`) | `measure` (`type`+`sql`) | DAX `Measure` (`canonical_expr` = DAX) |
+| **Raw fact column** | — (measure `expr`) | `FACTS(...)` split | — | field expression | dimension `sql` | `Column` |
+| **Join / entity** | `entities` primary/foreign (inferred) | `RELATIONSHIPS ... MANY TO ONE` | none (single-source) | `relationships` (`from`→many, `to`→one) | `explore` `join` + `relationship` | model `relationships` (many→one) |
+| **Metric composition** | ratio/derived, offset, filter | inlined into `expr` | inlined into `expr` | inlined into expression | inlined into `sql` (or `type`) | inlined into DAX |
+| **Saved query** | `saved_queries` | — | — | — | — (Looks / dashboards, not parsed) | report → `SavedQuery` (+`GROUPED_BY` field usage) |
+| **NL / presentation** | `label`, `description` | `LABEL`, `COMMENT` | `display_name`, `format`, `synonyms` | `description`, `ai_context` | `label`, `group_label` | column/measure `Description` |
+| **Format** | YAML (→ artifacts) | SQL DDL | YAML | YAML **or** JSON | LookML DSL | REST + DAX `INFO.VIEW.*` JSON dump |
 
 ## Per-platform notes for parsing
 
@@ -35,6 +35,13 @@ measure/metric) and diverge on the extras. This table drives the parsers.
   `type(sql)` (e.g. `sum(${TABLE}.amount)`). `explore` `join` blocks →`JOINS` using
   the `relationship` as cardinality. A `primary_key: yes` dimension also emits an
   `Entity`.
+- **Power BI** (`parse_powerbi.py`) — reads a metadata dump *directory*, not a file:
+  dataset→`SemanticModel`, table→`PhysicalTable` (`<database>.<table>`, no schema),
+  column→`Column`, DAX measure→`Measure`, report→`SavedQuery`, report field-usage→
+  `GROUPED_BY`. `link_to_dbt()` then matches Power BI tables to dbt relations by
+  database + identifier and adds `DEPENDS_ON` edges. Auto date tables
+  (`LocalDateTable*`/`DateTableTemplate*`) and hidden/`RowNumber` columns are
+  dropped. Full detail: [powerbi.md](powerbi.md).
 
 ## Normalizing across the spread
 

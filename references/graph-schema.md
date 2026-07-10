@@ -14,7 +14,7 @@ The graph is a single JSON document:
 ```
 
 Every node/edge carries a `platform` provenance tag (`dbt` | `snowflake` |
-`databricks` | `osi` | `lookml`). Node ids are stable and readable:
+`databricks` | `osi` | `lookml` | `powerbi`). Node ids are stable and readable:
 `"<platform>:<type>:<qualifier>"`,
 e.g. `dbt:Metric:total_gross_revenue`,
 `snowflake:PhysicalTable:atlas_platform.marts_core.fct_orders`. `normalized_name`

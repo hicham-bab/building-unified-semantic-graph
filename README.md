@@ -7,7 +7,9 @@ graph** and flags **cross-platform drift**.
 It ingests everything dbt Fusion's static analysis (the language server) knows about
 a project — models, columns, lineage — plus every semantic spec in play, and merges
 them into a single JSON property graph. It then reconciles "the same" metric defined
-in multiple places and reports where the definitions disagree.
+in multiple places and reports where the definitions disagree. It also ingests a
+**Power BI** workspace's metadata and traces reports back through their datasets and
+tables to the dbt models that build them.
 
 ## Supported semantic specs
 
@@ -18,6 +20,7 @@ in multiple places and reports where the definitions disagree.
 | Databricks Metric Views | YAML (spec `version: 1.1`) | `.yml` files |
 | Open Semantic Interchange (OSI) | YAML or JSON core-spec | [OSI](https://github.com/open-semantic-interchange/OSI) |
 | LookML | Looker `view` / `explore` DSL | `.lkml` files |
+| Power BI | REST + DAX metadata dump | `powerbi/pull_powerbi_metadata.py` |
 
 Plus dbt Fusion "LSP infos": `manifest.json`, `catalog.json`, and column-level
 lineage — via artifacts and, optionally, a live `dbt lsp --socket`.
@@ -58,6 +61,7 @@ python3 scripts/build_graph.py \
   --databricks-yaml '/path/to/metric_views/*.yml' \
   --osi '/path/to/*.osi.yml' \
   --lookml '/path/to/*.lkml' \
+  --powerbi metadata_output \
   --crosswalk crosswalk.json \
   --out semantic_graph.json
 ```
@@ -65,6 +69,7 @@ python3 scripts/build_graph.py \
 Every flag is optional and repeatable — provide only the specs you have. Quote the
 globs so the script expands them. `--dbt-project` accepts a project dir (its
 `target/` is used) or a `target/` dir directly, and may be repeated for a dbt Mesh.
+`--powerbi` takes a Power BI metadata dump directory (see below).
 
 ### Try the examples
 
@@ -75,6 +80,33 @@ python3 scripts/build_graph.py \
   --out /tmp/example_graph.json
 cat /tmp/example_graph_drift_report.md
 ```
+
+## Power BI (`powerbi/`)
+
+The `powerbi/` tooling pulls a Power BI workspace's metadata (via the Power BI REST +
+DAX APIs, authenticating with a token borrowed from your `az login`) into a
+`metadata_output/` directory, which `--powerbi` then reads.
+
+```bash
+# 1. Pull workspace / dataset / report metadata
+python3 powerbi/pull_powerbi_metadata.py --workspace <workspace-id>
+
+# 2. (optional) Parse which report visuals reference which fields
+python3 powerbi/pull_report_usage.py
+
+# 3a. Render standalone Mermaid lineage diagrams (source -> model -> report), or
+python3 powerbi/mermaid_graph.py
+
+# 3b. …link Power BI tables to a dbt project's manifest directly
+python3 powerbi/dbt_lineage.py run --project-id <dbt-project-id> --match name
+```
+
+`parse_powerbi.py` maps a dataset to a `SemanticModel`, each table to a
+`PhysicalTable` (`<database>.<table>` — Power BI exposes no schema), each report to a
+`SavedQuery`, and report field-usage to `GROUPED_BY` edges. When both dbt and Power BI
+are present, the builder matches Power BI tables to dbt-built relations by
+database + identifier and draws `DEPENDS_ON` edges into the dbt spine. Full detail:
+[`references/powerbi.md`](references/powerbi.md).
 
 ## How it works
 
@@ -89,7 +121,8 @@ optional crosswalk file for deliberate renames.
 
 **Start with [`ARCHITECTURE.md`](ARCHITECTURE.md)** for the full data flow, module
 map, and design rationale. Then [`references/`](references/) has the field-level
-detail: the graph schema, spec crosswalk, artifact generation, and drift rules.
+detail: the graph schema, spec crosswalk, artifact generation, drift rules, and the
+Power BI mapping.
 
 ## Layout
 
@@ -97,6 +130,7 @@ detail: the graph schema, spec crosswalk, artifact generation, and drift rules.
 ARCHITECTURE.md               # full design: data flow, module map, rationale
 SKILL.md                      # the Wizard skill definition
 scripts/                      # parsers + graph model + CLI (dependency-light Python)
-references/                   # schema, crosswalk, artifacts, drift docs (loaded on demand)
+powerbi/                      # Power BI metadata pullers + Mermaid + dbt-manifest linker
+references/                   # schema, crosswalk, artifacts, drift, Power BI (loaded on demand)
 examples/                     # OSI + LookML fixtures and a sample crosswalk
 ```

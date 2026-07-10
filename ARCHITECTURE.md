@@ -6,9 +6,15 @@ This document is the map of how the skill works end to end. Deep detail lives in
 ## Purpose
 
 Take the semantic definitions scattered across a data stack — dbt, Snowflake,
-Databricks, OSI, LookML — plus what dbt Fusion's static analysis knows about the
-project, merge them into **one property graph**, and report where "the same" metric
-defined in multiple places actually disagrees (**cross-platform drift**).
+Databricks, OSI, LookML, and Power BI — plus what dbt Fusion's static analysis
+knows about the project, merge them into **one property graph**, and report where
+"the same" metric defined in multiple places actually disagrees (**cross-platform
+drift**). The Power BI side additionally traces reports back through their datasets
+and tables to the dbt models that build them.
+
+The repo pairs the framework (`scripts/`) with the Power BI tooling (`powerbi/`)
+that produces the metadata dump the framework consumes; see the README for the
+`powerbi/` pull/link/diagram workflow.
 
 ## Data flow
 
@@ -23,8 +29,10 @@ defined in multiple places actually disagrees (**cross-platform drift**).
  spec files ──┤ *.sql  ─► parse_snowflake_semantic_view.py ────┤          │
               │ *.yml  ─► parse_databricks_metric_view.py ──────┤  merge   │
               │ *.osi  ─► parse_osi.py ─────────────────────────┤  into    │
-              │ *.lkml ─► parse_lookml.py ──────────────────────┘  one     │
-              └──────────────────────────────────────────────────Graph────┘
+              │ *.lkml ─► parse_lookml.py ──────────────────────┤  one     │
+              │ metadata_output/ ─► parse_powerbi.py ───────────┘  Graph   │
+              │        (Power BI dump)   │ + link_to_dbt()               │ │
+              └──────────────────────────────────────────────────────────┘
                                                                     │
                      ┌──────────────────────────────────┐          │
  live server ───────►│ lsp_client.py  (optional enrich) │──────────┤
@@ -60,7 +68,10 @@ dbt is the only spec that carries a **metric-composition graph** (ratio/derived
 metrics, `MEASURE_OF`/`COMPOSED_OF`), **saved queries**, and fully-resolved
 **physical back-links** (`node_relation`). So it is parsed first; the other specs
 attach to the same physical tables (by `relation_name`) and the same concept space
-(by normalized name), rather than living in disconnected islands.
+(by normalized name), rather than living in disconnected islands. Power BI is the
+clearest case: it has no schema in its warehouse binding, so `parse_powerbi.link_to_dbt()`
+matches its tables to dbt-built relations by database + identifier and draws
+`DEPENDS_ON` edges into the dbt spine.
 
 ## Module map (`scripts/`)
 
@@ -73,8 +84,15 @@ attach to the same physical tables (by `relation_name`) and the same concept spa
 | `parse_databricks_metric_view.py` | Databricks Metric View YAML (v1.1); normalizes `synonyms`/`format`. |
 | `parse_osi.py` | Open Semantic Interchange core-spec (YAML/JSON); multi-dialect expressions. |
 | `parse_lookml.py` | LookML `view`/`explore` DSL (custom tokenizer). |
+| `parse_powerbi.py` | Power BI metadata dump (datasets/reports/columns/measures/relationships) → graph, plus `link_to_dbt()` bridging Power BI tables to dbt relations. |
 | `detect_drift.py` | Cross-platform matching, `EQUIVALENT_TO`/`DRIFT` edges, drift report, concept catalog, crosswalk loading. |
 | `lsp_client.py` | Optional live Fusion LSP enrichment (listen + spawn + JSON-RPC handshake). |
+
+The Power BI **pullers** live under `powerbi/` (not `scripts/`): `pbi_client.py`,
+`pull_powerbi_metadata.py`, `pull_report_usage.py` produce `metadata_output/`;
+`mermaid_graph.py` and `dbt_lineage.py` are the standalone Mermaid / dbt-manifest
+lineage tools. `scripts/parse_powerbi.py` reads their JSON output — the framework
+has no import dependency on `powerbi/`.
 
 Dependencies are light: standard library + `pyyaml`, plus `pyarrow` only for the CLL
 parquet path. Every parser is independent and degrades gracefully — provide only the

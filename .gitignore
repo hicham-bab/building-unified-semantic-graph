@@ -1,10 +1,36 @@
+# ---- Secrets / credentials (NEVER commit) ----
+.env
+.env.*
+*.env
+!.env.example
+
+# Private keys / certificates
+*.p8
+*.pem
+*.key
+*.pfx
+*.p12
+snowflake_key*
+*.pub
+
+# ---- Python ----
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
-# generated graph outputs
+env/
+.ipynb_checkpoints/
+
+# ---- Generated / pulled metadata output ----
+metadata_output/
+
+# ---- Generated unified-semantic-graph outputs ----
 *_graph.json
 *_drift_report.md
 *_concepts.json
 semantic_graph*.json
+
+# ---- Editor / OS ----
 .DS_Store
+.claude/settings.local.json
